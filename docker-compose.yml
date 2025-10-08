@@ -1,0 +1,96 @@
+services:
+
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-todo_db}
+      POSTGRES_USER: ${POSTGRES_USER:-todo_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-todo_password}
+    ports:
+      - "5432:5432"
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "sh -c 'pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}'" ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  backend:
+    build: ./backend
+    command: bash -c "
+      python manage.py makemigrations &&
+      python manage.py migrate && 
+      python manage.py create_bot_user &&
+      python manage.py runserver 0.0.0.0:8000"
+    volumes:
+      - ./backend:/app
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=redis://redis:6379/0
+      - BOT_API_URL=http://bot:8001/send_message
+      - DJANGO_SETTINGS_MODULE=todo_project.settings
+
+  celery_worker:
+    build: ./backend
+    command: bash -c "cd /app && celery -A todo_project worker -l info"
+    volumes:
+      - ./backend:/app
+    working_dir: /app
+    depends_on:
+      backend:
+        condition: service_started
+      redis:
+        condition: service_started
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DJANGO_SETTINGS_MODULE=todo_project.settings
+
+  celery_beat:
+    build: ./backend
+    command: celery -A todo_project beat -l info
+    volumes:
+      - ./backend:/app
+    working_dir: /app
+    depends_on:
+      backend:
+        condition: service_started
+      redis:
+        condition: service_started
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DJANGO_SETTINGS_MODULE=todo_project.settings
+
+  bot:
+    build: ./bot
+    command: python main.py
+    volumes:
+      - ./bot:/app
+    ports:
+      - "8001:8001"
+    depends_on:
+      - backend
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - API_BASE_URL=http://backend:8000
+
+volumes:
+  postgres_data:
+  redis_data:
